@@ -3,6 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-iOS%20%7C%20iPadOS%20%7C%20macOS-blue.svg)]()
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero%20pip%20deps-brightgreen.svg)]()
+[![Release](https://img.shields.io/github/v/release/vitoksmile/app-store-release-cli?color=brightgreen)](https://github.com/vitoksmile/app-store-release-cli/releases/latest)
 
 A lightweight, framework-agnostic command-line tool to automate **App Store Connect release management**:
 - 🌐 Synchronize localized store metadata from a single CSV across any number of languages.
@@ -15,23 +16,23 @@ A lightweight, framework-agnostic command-line tool to automate **App Store Conn
 
 ## ⚡ Quick Start
 
-### 1. Installation
+### 1-Line Global Installation
 
-Clone the repository:
+Install directly on macOS / Linux into `/usr/local/bin/asc-release`:
+
 ```bash
-git clone https://github.com/vitoksmile/app-store-release-cli.git
-cd app-store-release-cli
-chmod +x release.sh asc_client.py
+curl -fsSL https://raw.githubusercontent.com/vitoksmile/app-store-release-cli/main/install.sh | bash
 ```
 
-*(Optional)* Add to your system `$PATH` or create an alias:
+*Or install manually via Git:*
 ```bash
-ln -s "$(pwd)/release.sh" /usr/local/bin/asc-release
+git clone https://github.com/vitoksmile/app-store-release-cli.git ~/tools/app-store-release-cli
+sudo ln -sf ~/tools/app-store-release-cli/release.sh /usr/local/bin/asc-release
 ```
 
 ---
 
-### 2. App Store Connect API Credentials (One-time Setup)
+### App Store Connect API Credentials (One-time Setup)
 
 Create an App Store Connect API Key in [App Store Connect](https://appstoreconnect.apple.com/):
 1. Go to **Users and Access** → **Integrations** → **App Store Connect API**.
@@ -52,7 +53,7 @@ ASC_KEY_FILE="AuthKey_XXXXXXXXXX.p8"
 
 ---
 
-### 3. Metadata CSV (`app_store_metadata.csv`)
+### Metadata CSV (`app_store_metadata.csv`)
 
 Each app defines its own supported languages in a CSV file. See [`app_store_metadata.csv.example`](app_store_metadata.csv.example) for a template.
 
@@ -71,7 +72,19 @@ The CLI automatically matches language names to whatever locales are enabled on 
 
 ## 📲 Integrating Into Existing Projects
 
-### Option 1: Flutter Projects
+### Option 1: Global CLI (Recommended)
+
+Once installed via `curl ... | bash`:
+1. Put `app_store_metadata.csv` and `.env` in your project folder.
+2. Put your `AuthKey_*.p8` in `~/.appstoreconnect/private_keys/`.
+3. Run from anywhere:
+   ```bash
+   asc-release --bundle-id com.example.myapp --dry-run
+   ```
+
+---
+
+### Option 2: Flutter Projects
 
 #### Step 1: Add as a Git Submodule
 In your Flutter project root:
@@ -99,10 +112,9 @@ APP_METADATA_CSV="ios/app_store_metadata.csv"
 
 #### Step 4: Run from Flutter
 ```bash
-# 1. Build and upload your iOS app archive
+# 1. Build iOS app archive
 flutter build ipa --release
-# Upload to App Store Connect via Xcode Organizer or:
-# xcrun altool --upload-app --type ios -f build/ios/ipa/*.ipa ...
+# Upload to App Store Connect via Xcode Organizer or xcrun altool
 
 # 2. Dry-run metadata verification
 ./scripts/release/release.sh --dry-run
@@ -116,48 +128,20 @@ flutter build ipa --release
 
 ---
 
-### Option 2: Native iOS Projects (Xcode / SwiftUI / UIKit)
+### Option 3: Native iOS Projects (Xcode / SwiftUI / UIKit)
 
-#### Step 1: Add Submodule or Copy Script
-```bash
-git submodule add https://github.com/vitoksmile/app-store-release-cli.git scripts/release
-```
-
-#### Step 2: Create Metadata CSV
-```bash
-cp scripts/release/app_store_metadata.csv.example scripts/release/app_store_metadata.csv
-```
-
-#### Step 3: Workflow
 1. In Xcode: **Product → Archive** → **Distribute App** → **App Store Connect**.
 2. Test build in **TestFlight**.
-3. Once validated:
+3. Once validated, sync metadata and submit for review:
    ```bash
-   ./scripts/release/release.sh --submit
-   ```
-
----
-
-### Option 3: Global System CLI (Works from Any Directory)
-
-If you release multiple apps and don't want to copy scripts into every repo:
-
-1. Clone `app-store-release-cli` once to a shared location:
-   ```bash
-   git clone https://github.com/vitoksmile/app-store-release-cli.git ~/tools/app-store-release-cli
-   sudo ln -sf ~/tools/app-store-release-cli/release.sh /usr/local/bin/asc-release
-   ```
-2. Put your `AuthKey_*.p8` file in `~/.appstoreconnect/private_keys/`.
-3. In any project repository, just add `app_store_metadata.csv` and run:
-   ```bash
-   asc-release --bundle-id com.example.app --csv ./app_store_metadata.csv --dry-run
+   asc-release --submit
    ```
 
 ---
 
 ### Option 4: CI/CD Pipelines (GitHub Actions, Bitrise, Xcode Cloud)
 
-Export the credentials as environment secrets and run directly in your workflow:
+Export credentials as environment secrets and run directly in your workflow:
 
 ```yaml
 # Example GitHub Actions step
