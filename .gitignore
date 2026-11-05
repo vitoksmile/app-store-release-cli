@@ -1,0 +1,16 @@
+# Environment & Secrets
+.env
+.env.local
+env
+*.p8
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+
+# OS & Editors
+.DS_Store
+.vscode/
+.idea/
