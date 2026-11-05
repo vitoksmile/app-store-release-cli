@@ -6,9 +6,11 @@
 [![Release](https://img.shields.io/github/v/release/vitoksmile/app-store-release-cli?color=brightgreen)](https://github.com/vitoksmile/app-store-release-cli/releases/latest)
 
 A lightweight, framework-agnostic command-line tool to automate **App Store Connect release management**:
+- 🔨 Automatically build release binaries (`--build`) with auto-detection for Flutter or custom commands.
+- 📦 Upload IPA to TestFlight (`--upload`) using native Apple `xcrun altool` (zero extra tools needed).
 - 🌐 Synchronize localized store metadata from a single CSV across any number of languages.
-- 📦 Automatically link the latest uploaded **TestFlight** build to your App Store version.
-- 🚀 Submit the release for **App Store Review**.
+- 🔗 Automatically link the latest uploaded **TestFlight** build to your App Store version.
+- 🚀 Submit the release for **App Store Review** (`--submit`).
 - 🛠️ Works with **Flutter**, **React Native**, **Native iOS (Swift / SwiftUI)**, or any cross-platform technology.
 - 🔒 **Zero pip/gem dependencies**: Uses standard Python 3 and macOS/Linux system `openssl` for ES256 JWT signing.
 
@@ -167,6 +169,8 @@ Export credentials as environment secrets and run directly in your workflow:
 | `--submit` | Submits the version for App Store review | `false` |
 | `--version <ver>` | Explicitly target a version (e.g. `1.0.0`) | Active editable version |
 | `--create-version <ver>` | Creates new App Store version if needed | `None` |
+| `--build [cmd]` | Build release IPA (auto-detects Flutter or runs custom command) | `None` |
+| `--upload [ipa]` | Upload IPA to TestFlight via `xcrun altool` (auto-detects .ipa if omitted) | `None` |
 | `--no-attach-build` | Skip linking the latest TestFlight build | `false` |
 | `--key-id <id>` | App Store Connect API Key ID | `ASC_KEY_ID` in `.env` |
 | `--issuer-id <uuid>` | App Store Connect Issuer UUID | `ASC_ISSUER_ID` in `.env` |

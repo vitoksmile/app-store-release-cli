@@ -1,154 +1,79 @@
 #!/usr/bin/env python3
 """
-app-store-release-cli: Generic App Store Connect Release & Metadata Synchronization Tool.
-Works with iOS (Native Swift), Flutter, React Native, or any framework.
-Zero external pip dependencies: uses macOS/Linux system openssl for ES256 JWT signing.
+App Store Connect API CLI:
+- Auto-build release artifacts (Flutter, Xcode, or custom commands)
+- IPA upload to TestFlight via xcrun altool
+- Multi-language localized metadata synchronization from CSV
+- Build linking to App Store release version
+- App Store review submission
+- Zero pip dependencies (pure standard Python 3 + system openssl)
 """
 
 import sys
 import os
-import csv
 import json
 import time
-import argparse
 import base64
 import subprocess
 import urllib.request
 import urllib.parse
 import urllib.error
+import csv
+import argparse
+import glob
+from pathlib import Path
 
-# Universal mapping from common language names/codes to App Store Connect locale identifiers
-LOCALE_MAP = {
-    # English variants
-    'english': ['en-US', 'en-GB', 'en-CA', 'en-AU', 'en'],
-    'en': ['en-US', 'en-GB', 'en-CA', 'en-AU'],
-    'en-us': ['en-US'],
-    'en-gb': ['en-GB'],
-    'en-ca': ['en-CA'],
-    'en-au': ['en-AU'],
-    # French
-    'french': ['fr-FR', 'fr-CA', 'fr'],
-    'fr': ['fr-FR', 'fr-CA'],
-    'fr-fr': ['fr-FR'],
-    'fr-ca': ['fr-CA'],
-    # German
-    'german': ['de-DE', 'de'],
-    'de': ['de-DE'],
-    'de-de': ['de-DE'],
-    # Spanish
-    'spanish': ['es-ES', 'es-MX', 'es'],
-    'es': ['es-ES', 'es-MX'],
-    'es-es': ['es-ES'],
-    'es-mx': ['es-MX'],
-    # Portuguese
-    'portuguese': ['pt-BR', 'pt-PT', 'pt'],
-    'portuguese (br)': ['pt-BR', 'pt'],
-    'portuguese (brazil)': ['pt-BR', 'pt'],
-    'portuguese (portugal)': ['pt-PT', 'pt'],
-    'pt': ['pt-BR', 'pt-PT'],
-    'pt-br': ['pt-BR'],
-    'pt-pt': ['pt-PT'],
-    # Italian
-    'italian': ['it'],
-    'it': ['it'],
-    # Dutch
-    'dutch': ['nl-NL', 'nl'],
-    'nl': ['nl-NL'],
-    # Ukrainian
-    'ukrainian': ['uk'],
-    'uk': ['uk'],
-    # Japanese
-    'japanese': ['ja'],
-    'ja': ['ja'],
-    # Korean
-    'korean': ['ko'],
-    'ko': ['ko'],
-    # Chinese
-    'chinese (simplified)': ['zh-Hans'],
-    'chinese (traditional)': ['zh-Hant'],
-    'zh-hans': ['zh-Hans'],
-    'zh-hant': ['zh-Hant'],
-    'zh-cn': ['zh-Hans'],
-    'zh-tw': ['zh-Hant'],
-    # Other common languages
-    'arabic': ['ar-SA', 'ar'],
-    'ar': ['ar-SA'],
-    'turkish': ['tr'],
-    'tr': ['tr'],
-    'polish': ['pl'],
-    'pl': ['pl'],
-    'swedish': ['sv'],
-    'sv': ['sv'],
-    'danish': ['da'],
-    'da': ['da'],
-    'finnish': ['fi'],
-    'fi': ['fi'],
-    'norwegian': ['no'],
-    'no': ['no'],
-    'czech': ['cs'],
-    'cs': ['cs'],
-    'hungarian': ['hu'],
-    'hu': ['hu'],
-    'greek': ['el'],
-    'el': ['el'],
-    'hebrew': ['he'],
-    'he': ['he'],
-    'hindi': ['hi'],
-    'hi': ['hi'],
-    'indonesian': ['id'],
-    'id': ['id'],
-    'malay': ['ms'],
-    'ms': ['ms'],
-    'thai': ['th'],
-    'th': ['th'],
-    'vietnamese': ['vi'],
-    'vi': ['vi'],
-    'croatian': ['hr'],
-    'hr': ['hr'],
-    'slovak': ['sk'],
-    'sk': ['sk'],
-    'romanian': ['ro'],
-    'ro': ['ro'],
-}
-
-EXAMPLE_ISSUER_ID = "57246542-96fe-1a63-e053-0824d011072a"
+# ==============================================================================
+# 1. JWT & Cryptography (Zero Dependencies using system `openssl`)
+# ==============================================================================
 
 def base64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode('utf-8').rstrip('=')
 
 def der_to_raw_p1363(der: bytes) -> bytes:
-    """Convert ASN.1 DER ECDSA signature to IEEE P1363 raw (r, s) format (64 bytes)."""
+    """Convert ASN.1 DER ECDSA signature to IEEE P1363 raw (r || s) for ES256 JWT."""
+    if der[0] != 0x30:
+        raise ValueError("Invalid DER sequence")
     idx = 2
     if der[1] & 0x80:
         idx += (der[1] & 0x7F)
-    assert der[idx] == 0x02, "Invalid DER signature format"
-    idx += 1
-    r_len = der[idx]
-    idx += 1
-    r = int.from_bytes(der[idx:idx+r_len], 'big')
+    
+    # Read r
+    if der[idx] != 0x02:
+        raise ValueError("Expected integer for r")
+    r_len = der[idx + 1]
+    idx += 2
+    r_bytes = der[idx:idx + r_len]
     idx += r_len
-    assert der[idx] == 0x02, "Invalid DER signature format"
-    idx += 1
-    s_len = der[idx]
-    idx += 1
-    s = int.from_bytes(der[idx:idx+s_len], 'big')
-    return r.to_bytes(32, 'big') + s.to_bytes(32, 'big')
+    
+    # Read s
+    if der[idx] != 0x02:
+        raise ValueError("Expected integer for s")
+    s_len = der[idx + 1]
+    idx += 2
+    s_bytes = der[idx:idx + s_len]
+    
+    # Strip leading zero padding if 33 bytes
+    r_bytes = r_bytes[-32:].rjust(32, b'\x00')
+    s_bytes = s_bytes[-32:].rjust(32, b'\x00')
+    
+    return r_bytes + s_bytes
 
 def generate_jwt(key_id: str, issuer_id: str, key_path: str, expiration_seconds: int = 900) -> str:
-    """Generate ES256 JWT for App Store Connect API using system openssl."""
+    """Generate an ES256 JWT token using system OpenSSL."""
     now = int(time.time())
     header = {"alg": "ES256", "kid": key_id, "typ": "JWT"}
     payload = {
         "iss": issuer_id,
-        "iat": now - 30, # 30s buffer for clock drift
         "exp": now + expiration_seconds,
         "aud": "appstoreconnect-v1"
     }
     
-    header_b64 = base64url_encode(json.dumps(header, separators=(',', ':')).encode('utf-8'))
-    payload_b64 = base64url_encode(json.dumps(payload, separators=(',', ':')).encode('utf-8'))
-    signing_input = f"{header_b64}.{payload_b64}".encode('utf-8')
+    hdr_b64 = base64url_encode(json.dumps(header, separators=(',', ':')).encode('utf-8'))
+    pay_b64 = base64url_encode(json.dumps(payload, separators=(',', ':')).encode('utf-8'))
+    signing_input = f"{hdr_b64}.{pay_b64}".encode('utf-8')
     
+    # Sign using openssl dgst -sha256 -sign <key_path>
     proc = subprocess.Popen(
         ['openssl', 'dgst', '-sha256', '-sign', key_path],
         stdin=subprocess.PIPE,
@@ -157,13 +82,163 @@ def generate_jwt(key_id: str, issuer_id: str, key_path: str, expiration_seconds:
     )
     der_sig, err = proc.communicate(input=signing_input)
     if proc.returncode != 0:
-        raise RuntimeError(f"OpenSSL signing failed: {err.decode('utf-8', errors='ignore')}")
+        raise RuntimeError(f"OpenSSL signing failed: {err.decode('utf-8')}")
     
     raw_sig = der_to_raw_p1363(der_sig)
     sig_b64 = base64url_encode(raw_sig)
-    return f"{header_b64}.{payload_b64}.{sig_b64}"
+    return f"{hdr_b64}.{pay_b64}.{sig_b64}"
 
-class AppStoreConnectClient:
+# ==============================================================================
+# 2. Locale Matching & Aliases
+# ==============================================================================
+
+LOCALE_MAP = {
+    'english': ['en-US', 'en-GB', 'en-AU', 'en-CA'],
+    'en': ['en-US', 'en-GB', 'en-AU', 'en-CA'],
+    'en-us': ['en-US'],
+    'en-gb': ['en-GB'],
+    'french': ['fr-FR', 'fr-CA'],
+    'fr': ['fr-FR', 'fr-CA'],
+    'german': ['de-DE'],
+    'de': ['de-DE'],
+    'spanish': ['es-ES', 'es-MX'],
+    'es': ['es-ES', 'es-MX'],
+    'portuguese': ['pt-BR', 'pt-PT'],
+    'portuguese (br)': ['pt-BR'],
+    'portuguese (pt)': ['pt-PT'],
+    'pt': ['pt-BR', 'pt-PT'],
+    'pt-br': ['pt-BR'],
+    'korean': ['ko'],
+    'ko': ['ko'],
+    'japanese': ['ja'],
+    'ja': ['ja'],
+    'ukrainian': ['uk'],
+    'uk': ['uk'],
+    'italian': ['it'],
+    'it': ['it'],
+    'dutch': ['nl-NL'],
+    'nl': ['nl-NL'],
+    'polish': ['pl'],
+    'pl': ['pl'],
+    'turkish': ['tr'],
+    'tr': ['tr'],
+    'arabic': ['ar-SA'],
+    'ar': ['ar-SA'],
+    'chinese (simplified)': ['zh-Hans'],
+    'chinese (traditional)': ['zh-Hant'],
+    'zh-hans': ['zh-Hans'],
+    'zh-hant': ['zh-Hant'],
+    'zh': ['zh-Hans', 'zh-Hant'],
+    'czech': ['cs'],
+    'cs': ['cs'],
+    'croatian': ['hr'],
+    'hr': ['hr'],
+    'hindi': ['hi'],
+    'hi': ['hi']
+}
+
+# Character Limits
+LIMITS = {
+    'Name': 30,
+    'Subtitle': 30,
+    'Promotional Text': 170,
+    'Keywords': 100,
+    'What\'s New': 4000,
+    'Description': 4000
+}
+
+def read_metadata_csv(csv_path: str) -> list:
+    """Reads metadata CSV and strips BOM/whitespace."""
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Metadata CSV not found at: {csv_path}")
+    
+    entries = []
+    with open(csv_path, mode='r', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            clean_row = {k.strip(): (v.strip() if v else "") for k, v in row.items() if k}
+            if clean_row.get('Language'):
+                entries.append(clean_row)
+    return entries
+
+def validate_entries(entries: list):
+    """Enforces App Store Connect character limits."""
+    errors = []
+    for entry in entries:
+        lang = entry.get('Language', 'Unknown')
+        for field, max_len in LIMITS.items():
+            val = entry.get(field, "")
+            if len(val) > max_len:
+                errors.append(f"[{lang}] '{field}' exceeds {max_len} chars (length: {len(val)})")
+    if errors:
+        raise ValueError("Metadata validation failed:\n" + "\n".join(errors))
+
+def match_locale(lang_name: str, available_locales: list) -> str:
+    """Matches a language name or locale code to existing or supported ASC locales."""
+    cleaned = lang_name.lower().strip()
+    
+    # Direct match (e.g. en-US, uk, fr-FR)
+    for loc in available_locales:
+        if loc.lower() == cleaned:
+            return loc
+            
+    # Lookup in LOCALE_MAP
+    candidates = LOCALE_MAP.get(cleaned, [cleaned])
+    for candidate in candidates:
+        for loc in available_locales:
+            if loc.lower() == candidate.lower():
+                return loc
+                
+    # Fallback to first candidate
+    return candidates[0]
+
+# ==============================================================================
+# 3. Build & Upload Helpers
+# ==============================================================================
+
+def auto_detect_build_command(cwd: str) -> str:
+    """Determines the appropriate release build command based on project files."""
+    # Check for Flutter
+    if os.path.exists(os.path.join(cwd, 'pubspec.yaml')):
+        return "flutter build ipa --release"
+    
+    # Check for custom env command
+    env_cmd = os.getenv('APP_BUILD_CMD')
+    if env_cmd:
+        return env_cmd
+        
+    return None
+
+def auto_detect_ipa(search_dirs: list) -> str:
+    """Finds the most recently modified .ipa file in candidate directories."""
+    candidates = []
+    for d in search_dirs:
+        if os.path.exists(d):
+            candidates.extend(Path(d).glob("**/*.ipa"))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(candidates[0])
+
+def run_build(build_cmd: str, dry_run: bool = False):
+    """Runs the release build command."""
+    print(f"\n🔨 Building Release Artifact...")
+    print(f"  Command: {build_cmd}")
+    if dry_run:
+        print("  ℹ️ [Dry-Run] Skipping actual build execution.")
+        return True
+        
+    res = subprocess.run(build_cmd, shell=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"Build command failed with exit code {res.returncode}")
+    print("  ✅ Build completed successfully!")
+    return True
+
+# ==============================================================================
+# 4. App Store Connect API Client
+# ==============================================================================
+
+class AppStoreConnectAPI:
     BASE_URL = "https://api.appstoreconnect.apple.com/v1"
     
     def __init__(self, key_id: str, issuer_id: str, key_path: str):
@@ -171,104 +246,64 @@ class AppStoreConnectClient:
         self.issuer_id = issuer_id
         self.key_path = key_path
         self._token = None
-        self._token_time = 0
+        self._token_expires_at = 0
         
     def get_token(self) -> str:
-        # Refresh token every 12 minutes
-        if not self._token or (time.time() - self._token_time) > 720:
+        now = int(time.time())
+        if not self._token or now >= self._token_expires_at - 60:
             self._token = generate_jwt(self.key_id, self.issuer_id, self.key_path)
-            self._token_time = time.time()
+            self._token_expires_at = now + 900
         return self._token
 
-    def request(self, method: str, path: str, payload: dict = None) -> dict:
-        url = f"{self.BASE_URL}{path}" if path.startswith('/') else path
+    def request(self, method: str, path: str, body: dict = None) -> dict:
+        url = f"{self.BASE_URL}{path}"
         headers = {
             "Authorization": f"Bearer {self.get_token()}",
             "Content-Type": "application/json"
         }
-        data = json.dumps(payload).encode('utf-8') if payload else None
+        data = json.dumps(body).encode('utf-8') if body else None
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        
         try:
             with urllib.request.urlopen(req) as resp:
-                status = resp.status
-                if status == 204:
+                if resp.status == 204:
                     return {}
-                body = resp.read().decode('utf-8')
-                return json.loads(body) if body else {}
+                return json.loads(resp.read().decode('utf-8'))
         except urllib.error.HTTPError as e:
-            err_body = e.read().decode('utf-8', errors='ignore')
-            raise RuntimeError(f"App Store Connect API error ({e.code}) on {method} {url}: {err_body}")
+            err_msg = e.read().decode('utf-8')
+            try:
+                err_json = json.loads(err_msg)
+                details = [err.get('detail', err.get('title', 'Unknown error')) for err in err_json.get('errors', [])]
+                full_msg = f"HTTP {e.code}: " + "; ".join(details)
+            except Exception:
+                full_msg = f"HTTP {e.code}: {err_msg}"
+            raise RuntimeError(full_msg)
 
-def read_metadata_csv(csv_path: str) -> list:
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"Metadata CSV not found at: {csv_path}")
-        
-    entries = []
-    with open(csv_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            lang = row.get('Language') or row.get('language') or row.get('Locale') or row.get('locale') or ''
-            name = row.get('Name') or row.get('name') or row.get('App Name') or ''
-            subtitle = row.get('Subtitle') or row.get('subtitle') or ''
-            promo = row.get('Promotional Text') or row.get('promotional text') or row.get('Promo') or ''
-            whats_new = row.get("What's New") or row.get("whats_new") or row.get("What’s New") or row.get("Release Notes") or ''
-            desc = row.get('Description') or row.get('description') or ''
-            keywords = row.get('Keywords') or row.get('keywords') or ''
+    def upload_ipa(self, ipa_path: str) -> bool:
+        """Uploads IPA to App Store Connect / TestFlight using xcrun altool."""
+        print(f"\n📦 Uploading IPA to TestFlight via xcrun altool: {ipa_path}")
+        if not os.path.exists(ipa_path):
+            raise FileNotFoundError(f"IPA file not found: {ipa_path}")
             
-            if lang.strip():
-                entries.append({
-                    'language': lang.strip(),
-                    'name': name.strip(),
-                    'subtitle': subtitle.strip(),
-                    'promotional_text': promo.strip(),
-                    'whats_new': whats_new.strip(),
-                    'description': desc.strip(),
-                    'keywords': keywords.strip(),
-                })
-    return entries
-
-def validate_entries(entries: list):
-    print("🔍 Validating metadata character limits...")
-    has_errors = False
-    for item in entries:
-        lang = item['language']
-        checks = [
-            ('Name', item['name'], 30),
-            ('Subtitle', item['subtitle'], 30),
-            ('Promotional Text', item['promotional_text'], 170),
-            ('Keywords', item['keywords'], 100),
-            ("What's New", item['whats_new'], 4000),
-            ('Description', item['description'], 4000),
+        cmd = [
+            "xcrun", "altool", "--upload-package", ipa_path,
+            "--type", "ios",
+            "--api-key", self.key_id,
+            "--api-issuer", self.issuer_id
         ]
-        for field, val, max_len in checks:
-            if len(val) > max_len:
-                print(f"  ❌ [{lang}] {field} exceeds limit: {len(val)} > {max_len}")
-                has_errors = True
-    if has_errors:
-        raise ValueError("Metadata validation failed due to character limits.")
-    print("  ✅ All metadata fields within App Store Connect limits.")
+        
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in proc.stdout:
+            print(f"  {line.rstrip()}")
+        proc.wait()
+        
+        if proc.returncode != 0:
+            raise RuntimeError(f"altool upload failed with exit code {proc.returncode}")
+        print("  ✅ Upload succeeded!")
+        return True
 
-def match_locale(lang_name: str, available_locales: list) -> str:
-    norm = lang_name.lower().strip()
-    # Check exact match in available locales
-    for avail in available_locales:
-        if norm == avail.lower():
-            return avail
-            
-    # Check candidates from map
-    candidates = LOCALE_MAP.get(norm, [norm])
-    for cand in candidates:
-        for avail in available_locales:
-            if cand.lower() == avail.lower():
-                return avail
-                
-    # Prefix match (e.g. 'de' matches 'de-DE')
-    for avail in available_locales:
-        if avail.lower().startswith(norm[:2]):
-            return avail
-            
-    return candidates[0]
+# ==============================================================================
+# 5. CLI Execution Flow
+# ==============================================================================
 
 def main():
     parser = argparse.ArgumentParser(
@@ -277,22 +312,33 @@ def main():
         epilog="""
 Examples:
   # Validate CSV and test connection (dry run):
-  ./release.sh --bundle-id com.example.myapp --dry-run
+  asc-release --dry-run
+
+  # Build release IPA and upload to TestFlight:
+  asc-release --build --upload
+
+  # Build, upload, sync metadata, and submit for review:
+  asc-release --build --upload --submit
+
+  # Upload build (.ipa) and sync metadata:
+  asc-release --upload build/ios/ipa/myapp.ipa
+
+  # Auto-detect latest .ipa and upload:
+  asc-release --upload
 
   # Sync metadata & link latest TestFlight build:
-  ./release.sh --bundle-id com.example.myapp
-
-  # Sync metadata, link build, and submit for review:
-  ./release.sh --bundle-id com.example.myapp --submit
+  asc-release
 
   # Create a brand new App Store version if no editable version exists:
-  ./release.sh --bundle-id com.example.myapp --create-version 1.0.1 --submit
+  asc-release --create-version 1.4.1 --submit
         """
     )
     parser.add_argument('--bundle-id', default=os.getenv('APP_BUNDLE_ID'), help="Bundle identifier (e.g. com.example.app). Required.")
     parser.add_argument('--csv', default=os.getenv('APP_METADATA_CSV', 'app_store_metadata.csv'), help="Path to metadata CSV file (default: app_store_metadata.csv)")
     parser.add_argument('--version', default=None, help="App Store version to target (e.g. 1.4.0). Defaults to active editable version.")
     parser.add_argument('--create-version', default=None, help="Create a new App Store version if needed (e.g. 1.4.1)")
+    parser.add_argument('--build', nargs='?', const='__AUTO__', default=None, help="Build release IPA (auto-detects Flutter or runs provided command)")
+    parser.add_argument('--upload', nargs='?', const='__AUTO__', default=None, help="Upload IPA to TestFlight (pass file path or leave empty to auto-detect)")
     parser.add_argument('--key-id', default=os.getenv('ASC_KEY_ID'), help="App Store Connect API Key ID")
     parser.add_argument('--issuer-id', default=os.getenv('ASC_ISSUER_ID'), help="App Store Connect Issuer ID")
     parser.add_argument('--key-file', default=os.getenv('ASC_KEY_FILE'), help="Path to AuthKey_*.p8 private key file")
@@ -312,302 +358,320 @@ Examples:
         print("Please provide --bundle-id <your.bundle.id> or set APP_BUNDLE_ID in .env.")
         sys.exit(1)
         
-    # 2. Read & validate CSV
+    # 2. Check and read metadata CSV
+    if not os.path.exists(args.csv):
+        print(f"\n❌ Error: Metadata CSV file not found: {args.csv}")
+        print("Specify the CSV via --csv <path> or APP_METADATA_CSV in .env.")
+        sys.exit(1)
+        
     entries = read_metadata_csv(args.csv)
     print(f"📖 Loaded {len(entries)} language entries from: {args.csv}")
-    validate_entries(entries)
     
-    # 3. Check credentials
-    if not (args.key_id and args.issuer_id and args.key_file):
-        print("\n⚠️  Missing App Store Connect API Credentials!")
-        print("Please provide via arguments or environment variables in .env:")
-        print("  - ASC_KEY_ID (e.g. 2X9R4HXF34)")
-        print("  - ASC_ISSUER_ID (e.g. 57246542-96fe-1a63-e053-0824d011072a)")
-        print("  - ASC_KEY_FILE (path to AuthKey_XXXXXX.p8)")
-        if args.dry_run:
-            print("\n[Dry-run completed successfully for CSV validation.]")
-            sys.exit(0)
-        sys.exit(1)
-        
-    if args.issuer_id.strip() == EXAMPLE_ISSUER_ID:
-        print(f"\n⚠️  ASC_ISSUER_ID is still set to the example template UUID ({EXAMPLE_ISSUER_ID}).")
-        print("Please copy your real Issuer ID from App Store Connect:")
-        print("  1. Go to App Store Connect -> Users and Access -> Integrations")
-        print("  2. Select 'App Store Connect API' on the left")
-        print("  3. Copy the 'Issuer ID' displayed at the top above the keys table")
-        print("  4. Update ASC_ISSUER_ID in .env")
-        if args.dry_run:
-            print("\n[Dry-run completed for CSV validation. Update Issuer ID to test live connection.]")
-            sys.exit(0)
-        sys.exit(1)
-        
-    if not os.path.exists(args.key_file):
-        print(f"\n⚠️  Private key file not found: {args.key_file}")
-        if args.dry_run:
-            print("[Dry-run completed successfully for CSV validation. Set real key file to test live connection.]")
-            sys.exit(0)
-        sys.exit(1)
-        
-    client = AppStoreConnectClient(args.key_id, args.issuer_id, args.key_file)
-    
-    # 4. Locate App
-    print(f"\n📱 Finding app with Bundle ID: {args.bundle_id}...")
+    # 3. Validate character limits
+    print("🔍 Validating metadata character limits...")
     try:
-        apps_resp = client.request("GET", f"/apps?filter[bundleId]={args.bundle_id}")
-    except RuntimeError as e:
-        if "401" in str(e):
-            print("\n❌ 401 Unauthorized from App Store Connect.")
-            print("Please double check that:")
-            print(f"  • Key ID ({args.key_id}) matches the key file name.")
-            print(f"  • Issuer ID ({args.issuer_id}) matches the Issuer ID in Users & Access -> Integrations.")
-            print(f"  • Key file ({args.key_file}) is the original uncorrupted .p8 file downloaded from Apple.")
-            if args.dry_run:
-                print("\n[Dry-run stopped at authentication check]")
-                sys.exit(1)
-        raise
-        
-    apps_data = apps_resp.get('data', [])
-    if not apps_data:
-        print(f"❌ No app found in App Store Connect with Bundle ID '{args.bundle_id}'")
+        validate_entries(entries)
+        print("  ✅ All metadata fields within App Store Connect limits.")
+    except ValueError as e:
+        print(f"\n❌ Validation Error:\n{e}")
         sys.exit(1)
-    app_id = apps_data[0]['id']
-    app_name = apps_data[0]['attributes'].get('name', 'Unknown')
+        
+    # 4. Check API credentials
+    if not args.key_id or not args.issuer_id or not args.key_file:
+        print("\n❌ Error: Missing App Store Connect API credentials!")
+        print("Please set ASC_KEY_ID, ASC_ISSUER_ID, and ASC_KEY_FILE in .env or pass flags.")
+        sys.exit(1)
+        
+    expanded_key_path = os.path.expanduser(args.key_file)
+    if not os.path.exists(expanded_key_path):
+        print(f"\n❌ Error: Private key file not found: {expanded_key_path}")
+        sys.exit(1)
+        
+    api = AppStoreConnectAPI(args.key_id, args.issuer_id, expanded_key_path)
+
+    # 4a. Handle Build if requested
+    if args.build:
+        build_cmd = args.build
+        if build_cmd == '__AUTO__':
+            build_cmd = auto_detect_build_command(os.getcwd())
+            if not build_cmd:
+                print("\n❌ Error: Could not auto-detect build command (e.g. no pubspec.yaml found).")
+                print("Please provide build command explicitly: --build 'flutter build ipa --release'")
+                sys.exit(1)
+            print(f"🔍 Auto-detected build command: {build_cmd}")
+            
+        run_build(build_cmd, dry_run=args.dry_run)
+
+    # 4b. Handle IPA Upload if requested
+    if args.upload:
+        ipa_path = args.upload
+        if ipa_path == '__AUTO__':
+            search_paths = [
+                os.getcwd(),
+                os.path.join(os.getcwd(), 'build'),
+                os.path.join(os.getcwd(), 'build/ios/ipa'),
+                os.path.join(os.getcwd(), 'ios/build')
+            ]
+            ipa_path = auto_detect_ipa(search_paths)
+            if not ipa_path:
+                if args.dry_run:
+                    ipa_path = "build/ios/ipa/*.ipa (auto-detected placeholder)"
+                else:
+                    print("\n❌ Error: No .ipa file found automatically in build directories!")
+                    print("Please specify path explicitly: --upload path/to/app.ipa")
+                    sys.exit(1)
+            if not args.dry_run or not ipa_path.endswith("(auto-detected placeholder)"):
+                print(f"🔍 Auto-detected latest IPA: {ipa_path}")
+        
+        if args.dry_run:
+            print(f"ℹ️ [Dry-Run] Would upload IPA to TestFlight: {ipa_path}")
+        else:
+            api.upload_ipa(ipa_path)
+
+    # 5. Find App by Bundle ID
+    print(f"\n📱 Finding app with Bundle ID: {args.bundle_id}...")
+    apps_data = api.request("GET", f"/apps?filter[bundleId]={args.bundle_id}")
+    apps = apps_data.get("data", [])
+    if not apps:
+        print(f"❌ Error: App with bundle ID '{args.bundle_id}' not found.")
+        sys.exit(1)
+    app = apps[0]
+    app_id = app["id"]
+    app_name = app["attributes"]["name"]
     print(f"  ✅ Found App: '{app_name}' (ID: {app_id})")
     
-    # 5. Locate App Store Version
+    # 6. Resolve App Store Version
     print("\n🔍 Finding App Store version...")
-    versions_resp = client.request("GET", f"/apps/{app_id}/appStoreVersions")
-    versions = versions_resp.get('data', [])
+    versions_data = api.request("GET", f"/apps/{app_id}/appStoreVersions")
+    versions = versions_data.get("data", [])
     
     target_version = None
-    if args.version:
+    if args.create_version:
+        print(f"  Creating new App Store Version '{args.create_version}'...")
+        if args.dry_run:
+            print(f"  ℹ️ [Dry-Run] Would create new version: {args.create_version}")
+            target_version = {
+                "id": "dry-run-version-id",
+                "attributes": {
+                    "versionString": args.create_version,
+                    "appStoreState": "PREPARE_FOR_SUBMISSION"
+                }
+            }
+        else:
+            create_payload = {
+                "data": {
+                    "type": "appStoreVersions",
+                    "attributes": {
+                        "platform": "IOS",
+                        "versionString": args.create_version
+                    },
+                    "relationships": {
+                        "app": {"data": {"type": "apps", "id": app_id}}
+                    }
+                }
+            }
+            res = api.request("POST", "/appStoreVersions", create_payload)
+            target_version = res["data"]
+            print(f"  ✅ Created Version: {args.create_version} (ID: {target_version['id']})")
+    elif args.version:
         for v in versions:
-            if v['attributes'].get('versionString') == args.version:
+            if v["attributes"]["versionString"] == args.version:
                 target_version = v
                 break
+        if not target_version:
+            print(f"❌ Error: Version '{args.version}' not found for this app.")
+            sys.exit(1)
     else:
+        editable_states = ['PREPARE_FOR_SUBMISSION', 'DEVELOPER_REJECTED', 'REJECTED', 'METADATA_REJECTED']
         for v in versions:
-            state = v['attributes'].get('appStoreState')
-            if state in ('PREPARE_FOR_SUBMISSION', 'DEVELOPER_REJECTED', 'REJECTED'):
+            if v["attributes"]["appStoreState"] in editable_states:
                 target_version = v
                 break
                 
     if not target_version:
-        if args.create_version:
-            print(f"  Creating new App Store Version '{args.create_version}'...")
-            if args.dry_run:
-                print(f"  ℹ️ [Dry-Run] Would create new version: {args.create_version}")
-                version_id = "dry-run-version-id"
-                version_str = args.create_version
-                version_state = "PREPARE_FOR_SUBMISSION"
-                target_version = {
-                    'id': version_id,
-                    'attributes': {'versionString': version_str, 'appStoreState': version_state}
-                }
-            else:
-                create_payload = {
-                    "data": {
-                        "type": "appStoreVersions",
-                        "attributes": {
-                            "platform": "IOS",
-                            "versionString": args.create_version
-                        },
-                        "relationships": {
-                            "app": {
-                                "data": {
-                                    "type": "apps",
-                                    "id": app_id
-                                }
-                            }
-                        }
-                    }
-                }
-                new_ver_resp = client.request("POST", "/appStoreVersions", create_payload)
-                target_version = new_ver_resp['data']
-                print(f"  ✅ Created new version: {args.create_version}")
-        else:
-            avail_versions = [f"{v['attributes'].get('versionString')} ({v['attributes'].get('appStoreState')})" for v in versions]
-            print(f"❌ Target version not found or not in editable state. Found: {', '.join(avail_versions)}")
-            print("💡 Tip: To target an existing version, pass --version <ver> (e.g. --version 1.4.0)")
-            print("💡 Tip: To create a new version, pass --create-version <ver> (e.g. --create-version 1.4.1)")
-            sys.exit(1)
+        found_versions_summary = ", ".join([f"{v['attributes']['versionString']} ({v['attributes']['appStoreState']})" for v in versions])
+        print(f"❌ Target version not found or not in editable state. Found: {found_versions_summary}")
+        print("💡 Tip: To target an existing version, pass --version <ver> (e.g. --version 1.4.0)")
+        print("💡 Tip: To create a new version, pass --create-version <ver> (e.g. --create-version 1.4.1)")
+        sys.exit(1)
         
-    version_id = target_version['id']
-    version_str = target_version['attributes'].get('versionString')
-    version_state = target_version['attributes'].get('appStoreState')
+    version_id = target_version["id"]
+    version_str = target_version["attributes"]["versionString"]
+    version_state = target_version["attributes"]["appStoreState"]
     print(f"  ✅ Target Version: {version_str} (State: {version_state}, ID: {version_id})")
-    
-    # 6. Fetch existing version localizations
+
+    # 7. Get Version Localizations
     print("\n🌐 Fetching existing localizations for version...")
     if version_id == "dry-run-version-id":
-        available_locales = [match_locale(item['language'], ['en-US', 'en-GB']) for item in entries]
-        existing_locs = {loc: {'id': f'mock-{loc}'} for loc in available_locales}
+        existing_version_locs = {}
+        available_locales = ['en-US', 'fr-FR', 'de-DE', 'es-ES', 'pt-BR', 'ko', 'ja', 'uk']
     else:
-        loc_resp = client.request("GET", f"/appStoreVersions/{version_id}/appStoreVersionLocalizations")
-        existing_locs = {loc['attributes']['locale']: loc for loc in loc_resp.get('data', [])}
-        available_locales = list(existing_locs.keys())
-    print(f"  Found existing locales: {', '.join(available_locales)}")
+        ver_locs_data = api.request("GET", f"/appStoreVersions/{version_id}/appStoreVersionLocalizations")
+        existing_version_locs = {loc["attributes"]["locale"]: loc for loc in ver_locs_data.get("data", [])}
+        available_locales = list(existing_version_locs.keys())
+    print(f"  Found existing locales: {', '.join(available_locales) if available_locales else 'None'}")
     
+    # 8. Get App Info Localizations (Name, Subtitle)
+    app_infos_data = api.request("GET", f"/apps/{app_id}/appInfos")
+    app_infos = app_infos_data.get("data", [])
+    
+    # Pick the editable AppInfo (PREPARE_FOR_SUBMISSION, etc.), fallback to first
+    app_info_id = None
+    editable_states = ['PREPARE_FOR_SUBMISSION', 'DEVELOPER_REJECTED', 'REJECTED', 'METADATA_REJECTED']
+    for info in app_infos:
+        if info.get("attributes", {}).get("appStoreState") in editable_states:
+            app_info_id = info["id"]
+            break
+    if not app_info_id and app_infos:
+        app_info_id = app_infos[0]["id"]
+    
+    existing_info_locs = {}
+    if app_info_id:
+        info_locs_data = api.request("GET", f"/appInfos/{app_info_id}/appInfoLocalizations")
+        existing_info_locs = {loc["attributes"]["locale"]: loc for loc in info_locs_data.get("data", [])}
+
+    # 9. Sync or Dry Run Metadata
     if args.dry_run:
         print("\n🔍 DRY-RUN MODE: Showing matching plan without updating:")
-        for item in entries:
-            target_locale = match_locale(item['language'], available_locales)
-            print(f"  • {item['language']} -> locale: {target_locale} (exists: {target_locale in existing_locs})")
-            if item.get('promotional_text'):
-                print(f"    - Promotional Text: {item['promotional_text'][:50]}... ({len(item['promotional_text'])} chars)")
-            if item.get('whats_new'):
-                print(f"    - What's New: {item['whats_new'].splitlines()[0]} ({len(item['whats_new'])} chars)")
-            if item.get('keywords'):
-                print(f"    - Keywords: {item['keywords'][:50]}... ({len(item['keywords'])} chars)")
+        for entry in entries:
+            lang = entry['Language']
+            matched = match_locale(lang, available_locales)
+            exists = matched in existing_version_locs or version_id == "dry-run-version-id"
+            print(f"  • {lang} -> locale: {matched} (exists: {exists})")
+            if entry.get('Name'):
+                print(f"    - Name: {entry['Name']}")
+            if entry.get('Subtitle'):
+                print(f"    - Subtitle: {entry['Subtitle']}")
+            if entry.get('Promotional Text'):
+                print(f"    - Promotional Text: {entry['Promotional Text'][:50]}... ({len(entry['Promotional Text'])} chars)")
+            if entry.get("What's New"):
+                wn_text = entry.get("What's New", '')
+                print(f"    - What's New: {wn_text} ({len(wn_text)} chars)")
+            if entry.get('Keywords'):
+                print(f"    - Keywords: {entry['Keywords'][:50]}... ({len(entry['Keywords'])} chars)")
         print("\n✅ Dry run complete. Everything looks good!")
-        sys.exit(0)
+        return
+
+    # Real sync execution
+    print("\n📝 Updating App Store Version Localizations...")
+    for entry in entries:
+        lang = entry['Language']
+        matched = match_locale(lang, available_locales)
+        print(f"  Updating [{lang}] -> locale '{matched}'...")
         
-    # 7. Apply version localizations
-    print("\n📝 Updating App Store Version localizations...")
-    for item in entries:
-        locale_code = match_locale(item['language'], available_locales)
-        print(f"  ➡️ Processing {item['language']} ({locale_code})...")
-        
-        loc_attributes = {}
-        if item.get('whats_new'):
-            loc_attributes['whatsNew'] = item['whats_new']
-        if item.get('description'):
-            loc_attributes['description'] = item['description']
-        if item.get('keywords'):
-            loc_attributes['keywords'] = item['keywords']
-        if item.get('promotional_text'):
-            loc_attributes['promotionalText'] = item['promotional_text']
+        # Build version localization attributes
+        ver_attrs = {}
+        if entry.get('Promotional Text'):
+            ver_attrs['promotionalText'] = entry['Promotional Text']
+        if entry.get("What's New"):
+            ver_attrs['whatsNew'] = entry.get("What's New")
+        if entry.get('Description'):
+            ver_attrs['description'] = entry['Description']
+        if entry.get('Keywords'):
+            ver_attrs['keywords'] = entry['Keywords']
             
-        if locale_code in existing_locs:
-            loc_id = existing_locs[locale_code]['id']
-            payload = {
-                "data": {
-                    "type": "appStoreVersionLocalizations",
-                    "id": loc_id,
-                    "attributes": loc_attributes
-                }
-            }
-            client.request("PATCH", f"/appStoreVersionLocalizations/{loc_id}", payload)
-            print(f"    ✅ Updated localization {locale_code}")
+        if matched in existing_version_locs:
+            loc_id = existing_version_locs[matched]["id"]
+            if ver_attrs:
+                api.request("PATCH", f"/appStoreVersionLocalizations/{loc_id}", {
+                    "data": {
+                        "type": "appStoreVersionLocalizations",
+                        "id": loc_id,
+                        "attributes": ver_attrs
+                    }
+                })
+                print(f"    ✅ Updated version localization ({matched})")
         else:
-            payload = {
-                "data": {
-                    "type": "appStoreVersionLocalizations",
-                    "attributes": {
-                        "locale": locale_code,
-                        **loc_attributes
-                    },
-                    "relationships": {
-                        "appStoreVersion": {
-                            "data": {
-                                "type": "appStoreVersions",
-                                "id": version_id
-                            }
+            if ver_attrs:
+                ver_attrs['locale'] = matched
+                api.request("POST", "/appStoreVersionLocalizations", {
+                    "data": {
+                        "type": "appStoreVersionLocalizations",
+                        "attributes": ver_attrs,
+                        "relationships": {
+                            "appStoreVersion": {"data": {"type": "appStoreVersions", "id": version_id}}
                         }
                     }
-                }
-            }
-            client.request("POST", "/appStoreVersionLocalizations", payload)
-            print(f"    ✅ Created new localization {locale_code}")
+                })
+                print(f"    ✅ Created new version localization ({matched})")
+                
+        # App Info Localizations (Name, Subtitle)
+        info_attrs = {}
+        if entry.get('Name'):
+            info_attrs['name'] = entry['Name']
+        if entry.get('Subtitle'):
+            info_attrs['subtitle'] = entry['Subtitle']
             
-    # 8. Check/Attach Build if requested
+        if info_attrs and app_info_id:
+            if matched in existing_info_locs:
+                current_loc = existing_info_locs[matched]
+                info_loc_id = current_loc["id"]
+                cur_attrs = current_loc.get("attributes", {})
+                
+                # Filter out attributes that haven't changed to avoid unnecessary PATCH
+                diff_attrs = {k: v for k, v in info_attrs.items() if cur_attrs.get(k) != v}
+                if diff_attrs:
+                    try:
+                        api.request("PATCH", f"/appInfoLocalizations/{info_loc_id}", {
+                            "data": {
+                                "type": "appInfoLocalizations",
+                                "id": info_loc_id,
+                                "attributes": diff_attrs
+                            }
+                        })
+                        print(f"    ✅ Updated App Name/Subtitle ({matched})")
+                    except Exception as e:
+                        print(f"    ⚠️ Could not update Name/Subtitle for {matched}: {e}")
+                else:
+                    print(f"    ℹ️ App Name/Subtitle already up-to-date ({matched})")
+            else:
+                info_attrs['locale'] = matched
+                try:
+                    api.request("POST", "/appInfoLocalizations", {
+                        "data": {
+                            "type": "appInfoLocalizations",
+                            "attributes": info_attrs,
+                            "relationships": {
+                                "appInfo": {"data": {"type": "appInfos", "id": app_info_id}}
+                            }
+                        }
+                    })
+                    print(f"    ✅ Created App Name/Subtitle ({matched})")
+                except Exception as e:
+                    print(f"    ⚠️ Could not set Name/Subtitle for {matched}: {e}")
+
+    # 10. Link Latest Build (if not skipped)
     if not args.no_attach_build:
-        print("\n📦 Checking uploaded build...")
-        builds_resp = client.request("GET", f"/builds?filter[app]={app_id}&limit=10")
-        builds = builds_resp.get('data', [])
-            
+        print("\n📦 Finding latest uploaded build...")
+        builds_data = api.request("GET", f"/builds?filter[app]={app_id}&sort=-uploadedDate&limit=1")
+        builds = builds_data.get("data", [])
         if builds:
             latest_build = builds[0]
-            build_id = latest_build['id']
-            build_num = latest_build['attributes'].get('version', 'Unknown')
-            build_state = latest_build['attributes'].get('processingState', 'Unknown')
-            print(f"  Found latest build: Build {build_num} (State: {build_state}, ID: {build_id})")
-            
-            attach_payload = {
-                "data": {
-                    "type": "appStoreVersions",
-                    "id": version_id,
-                    "relationships": {
-                        "build": {
-                            "data": {
-                                "type": "builds",
-                                "id": build_id
-                            }
-                        }
-                    }
-                }
-            }
-            try:
-                client.request("PATCH", f"/appStoreVersions/{version_id}", attach_payload)
-                print(f"  ✅ Attached Build {build_num} to Version {version_str}")
-            except Exception as e:
-                print(f"  ℹ️  Build attach status: {e}")
+            build_id = latest_build["id"]
+            build_ver = latest_build["attributes"].get("version")
+            print(f"  Attaching build {build_ver} (ID: {build_id}) to version {version_str}...")
+            api.request("PATCH", f"/appStoreVersions/{version_id}/relationships/build", {
+                "data": {"type": "builds", "id": build_id}
+            })
+            print(f"  ✅ Successfully linked build {build_ver} to release version {version_str}!")
         else:
-            print("  ⚠️  No builds found for this version in App Store Connect yet.")
-
-    # 9. Submit for review if requested
+            print("  ⚠️ No builds found for this app yet.")
+            
+    # 11. Submit for Review
     if args.submit:
-        print("\n🚀 Submitting version for review...")
-        try:
-            sub_payload = {
-                "data": {
-                    "type": "reviewSubmissions",
-                    "attributes": {
-                        "platform": "IOS"
-                    },
-                    "relationships": {
-                        "app": {
-                            "data": {
-                                "type": "apps",
-                                "id": app_id
-                            }
-                        }
-                    }
+        print("\n🚀 Submitting App Store Version for review...")
+        submission_payload = {
+            "data": {
+                "type": "appStoreVersionSubmissions",
+                "relationships": {
+                    "appStoreVersion": {"data": {"type": "appStoreVersions", "id": version_id}}
                 }
             }
-            sub_resp = client.request("POST", "/reviewSubmissions", sub_payload)
-            submission_id = sub_resp['data']['id']
-            
-            item_payload = {
-                "data": {
-                    "type": "reviewSubmissionItems",
-                    "relationships": {
-                        "reviewSubmission": {
-                            "data": {
-                                "type": "reviewSubmissions",
-                                "id": submission_id
-                            }
-                        },
-                        "appStoreVersion": {
-                            "data": {
-                                "type": "appStoreVersions",
-                                "id": version_id
-                            }
-                        }
-                    }
-                }
-            }
-            client.request("POST", "/reviewSubmissionItems", item_payload)
-            
-            submit_payload = {
-                "data": {
-                    "type": "reviewSubmissions",
-                    "id": submission_id,
-                    "attributes": {
-                        "submitted": True
-                    }
-                }
-            }
-            client.request("PATCH", f"/reviewSubmissions/{submission_id}", submit_payload)
-            print("  🎉 Successfully submitted for App Store review!")
-        except Exception as e:
-            print(f"  ⚠️  Review submission note: {e}")
-            print("  (You can also click 'Submit for Review' directly in App Store Connect)")
-    else:
-        print("\n💡 Metadata and build updated in App Store Connect.")
-        print("To submit for review directly from this script next time, pass `--submit`.")
-        
-    print("\n✨ Done!")
+        }
+        api.request("POST", "/appStoreVersionSubmissions", submission_payload)
+        print("  🎉 App version successfully submitted for App Store review!")
 
-if __name__ == '__main__':
+    print("\n🏁 Done! All operations completed successfully.")
+
+if __name__ == "__main__":
     main()
