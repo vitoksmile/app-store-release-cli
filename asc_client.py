@@ -751,16 +751,63 @@ Examples:
     # 11. Submit for Review
     if args.submit:
         print("\n🚀 Submitting App Store Version for review...")
-        submission_payload = {
-            "data": {
-                "type": "appStoreVersionSubmissions",
-                "relationships": {
-                    "appStoreVersion": {"data": {"type": "appStoreVersions", "id": version_id}}
+        if args.dry_run:
+            print("  ℹ️ [Dry-Run] Would create reviewSubmission, attach version, and submit for App Store review.")
+        else:
+            try:
+                # Modern App Store Connect reviewSubmissions API
+                subs = api.request("GET", f"/apps/{app_id}/reviewSubmissions?filter[state]=READY_FOR_REVIEW").get("data", [])
+                if subs:
+                    sub_id = subs[0]["id"]
+                else:
+                    sub = api.request("POST", "/reviewSubmissions", {
+                        "data": {
+                            "type": "reviewSubmissions",
+                            "attributes": {"platform": "IOS"},
+                            "relationships": {"app": {"data": {"type": "apps", "id": app_id}}}
+                        }
+                    })
+                    sub_id = sub["data"]["id"]
+
+                # Add version to review items if not present
+                items = api.request("GET", f"/reviewSubmissions/{sub_id}/items?include=appStoreVersion").get("data", [])
+                item_ver_ids = [
+                    it.get("relationships", {}).get("appStoreVersion", {}).get("data", {}).get("id")
+                    for it in items
+                ]
+                if version_id not in item_ver_ids:
+                    api.request("POST", "/reviewSubmissionItems", {
+                        "data": {
+                            "type": "reviewSubmissionItems",
+                            "relationships": {
+                                "reviewSubmission": {"data": {"type": "reviewSubmissions", "id": sub_id}},
+                                "appStoreVersion": {"data": {"type": "appStoreVersions", "id": version_id}}
+                            }
+                        }
+                    })
+
+                submitted = api.request("PATCH", f"/reviewSubmissions/{sub_id}", {
+                    "data": {
+                        "type": "reviewSubmissions",
+                        "id": sub_id,
+                        "attributes": {"submitted": True}
+                    }
+                })
+                sub_state = submitted.get("data", {}).get("attributes", {}).get("state", "SUBMITTED")
+                print(f"  🎉 App version successfully submitted for App Store review! (State: {sub_state})")
+            except Exception as e:
+                # Fallback to legacy appStoreVersionSubmissions API if needed
+                print(f"  ℹ️ reviewSubmissions returned: {e}. Trying legacy appStoreVersionSubmissions...")
+                submission_payload = {
+                    "data": {
+                        "type": "appStoreVersionSubmissions",
+                        "relationships": {
+                            "appStoreVersion": {"data": {"type": "appStoreVersions", "id": version_id}}
+                        }
+                    }
                 }
-            }
-        }
-        api.request("POST", "/appStoreVersionSubmissions", submission_payload)
-        print("  🎉 App version successfully submitted for App Store review!")
+                api.request("POST", "/appStoreVersionSubmissions", submission_payload)
+                print("  🎉 App version successfully submitted for App Store review!")
 
     print("\n🏁 Done! All operations completed successfully.")
 
