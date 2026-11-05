@@ -196,11 +196,101 @@ def match_locale(lang_name: str, available_locales: list) -> str:
 # 3. Build & Upload Helpers
 # ==============================================================================
 
+def auto_detect_xcode_build_command(cwd: str) -> str:
+    """Auto-detects native Xcode workspace/project, scheme, and generates archive & export commands."""
+    workspaces = glob.glob(os.path.join(cwd, '*.xcworkspace'))
+    projects = glob.glob(os.path.join(cwd, '*.xcodeproj'))
+    
+    # Exclude internal project.xcworkspace inside .xcodeproj
+    workspaces = [w for w in workspaces if not w.endswith('.xcodeproj/project.xcworkspace')]
+    
+    container_arg = ""
+    container_name = ""
+    if workspaces:
+        container_name = os.path.basename(workspaces[0])
+        container_arg = f'-workspace "{container_name}"'
+    elif projects:
+        container_name = os.path.basename(projects[0])
+        container_arg = f'-project "{container_name}"'
+    else:
+        return None
+        
+    # Query available schemes
+    schemes = []
+    try:
+        cmd = f"xcodebuild {container_arg} -list -json"
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=cwd)
+        if res.returncode == 0:
+            data = json.loads(res.stdout)
+            if 'workspace' in data:
+                schemes = data['workspace'].get('schemes', [])
+            elif 'project' in data:
+                schemes = data['project'].get('schemes', [])
+    except Exception:
+        pass
+        
+    # Heuristic to choose primary release scheme
+    chosen_scheme = os.getenv('XCODE_SCHEME') or os.getenv('APP_SCHEME')
+    if not chosen_scheme and schemes:
+        # Filter out tests, simulators, third-party libraries, widgets/extensions
+        ignored_patterns = ['test', 'simulator', 'extension', 'widget', 'pods', 'framework']
+        filtered = [
+            s for s in schemes
+            if not any(ign in s.lower() for ign in ignored_patterns)
+        ]
+        
+        # Match project base name if possible
+        base_name = os.path.splitext(container_name)[0].lower()
+        exact_matches = [s for s in (filtered or schemes) if s.lower() == base_name]
+        
+        if exact_matches:
+            chosen_scheme = exact_matches[0]
+        elif filtered:
+            chosen_scheme = filtered[0]
+        else:
+            chosen_scheme = schemes[0]
+            
+    if not chosen_scheme:
+        chosen_scheme = os.path.splitext(container_name)[0]
+
+    # Clean, create export options plist, archive, and export ipa
+    plist_path = "build/exportOptions.plist"
+    archive_path = f"build/{chosen_scheme}.xcarchive"
+    export_path = "build/ipa"
+    
+    cmd = (
+        f"mkdir -p build/ipa && "
+        f"printf '<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n"
+        f"<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\\n"
+        f"<plist version=\"1.0\">\\n"
+        f"<dict>\\n"
+        f"    <key>method</key>\\n"
+        f"    <string>app-store</string>\\n"
+        f"    <key>signingStyle</key>\\n"
+        f"    <string>automatic</string>\\n"
+        f"    <key>uploadBitcode</key>\\n"
+        f"    <false/>\\n"
+        f"    <key>compileBitcode</key>\\n"
+        f"    <false/>\\n"
+        f"</dict>\\n"
+        f"</plist>\\n' > {plist_path} && "
+        f"xcodebuild archive {container_arg} -scheme \"{chosen_scheme}\" "
+        f"-destination \"generic/platform=iOS\" -archivePath \"{archive_path}\" && "
+        f"xcodebuild -exportArchive -archivePath \"{archive_path}\" "
+        f"-exportOptionsPlist {plist_path} -exportPath {export_path} -allowProvisioningUpdates"
+    )
+    return cmd
+
 def auto_detect_build_command(cwd: str) -> str:
     """Determines the appropriate release build command based on project files."""
     # Check for Flutter
     if os.path.exists(os.path.join(cwd, 'pubspec.yaml')):
         return "flutter build ipa --release"
+        
+    # Check for Native Xcode project or workspace
+    xcode_cmd = auto_detect_xcode_build_command(cwd)
+    if xcode_cmd:
+        return xcode_cmd
     
     # Check for custom env command
     env_cmd = os.getenv('APP_BUILD_CMD')
@@ -409,6 +499,7 @@ Examples:
             search_paths = [
                 os.getcwd(),
                 os.path.join(os.getcwd(), 'build'),
+                os.path.join(os.getcwd(), 'build/ipa'),
                 os.path.join(os.getcwd(), 'build/ios/ipa'),
                 os.path.join(os.getcwd(), 'ios/build')
             ]
