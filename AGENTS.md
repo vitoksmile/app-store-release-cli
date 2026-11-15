@@ -8,7 +8,7 @@ Welcome! This repository contains **`app-store-release-cli`**, a lightweight, fr
 
 AI agents working in projects that integrate `app-store-release-cli` can use this tool to:
 1. **Validate store copy** for character limit compliance across multiple languages.
-2. **Synchronize localized metadata** (Name, Subtitle, Promotional Text, What's New, Description, Keywords) with App Store Connect without navigating the web portal.
+2. **Synchronize localized metadata** (Name, Subtitle, Promotional Text, What's New, Description, Keywords, Support URL, Marketing URL) with App Store Connect without navigating the web portal.
 3. **Attach TestFlight builds** automatically to store versions.
 4. **Trigger review submission** on behalf of the developer once QA passes.
 

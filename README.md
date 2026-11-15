@@ -67,6 +67,8 @@ Each app defines its own supported languages in a CSV file. See [`app_store_meta
 - `What's New`: Release notes (max 4,000 characters).
 - `Description`: Full store description (max 4,000 characters).
 - `Keywords`: Search keywords separated by commas (max 100 characters, no spaces after commas).
+- `Support URL`: Localized Support URL (`http://` or `https://`, optional; falls back to `--support-url` / `APP_SUPPORT_URL`).
+- `Marketing URL`: Localized Marketing URL (`http://` or `https://`, optional; falls back to `--marketing-url` / `APP_MARKETING_URL`).
 
 The CLI automatically matches language names to whatever locales are enabled on your App Store app record (e.g. `English` automatically maps to `en-GB`, `en-US`, or `en` depending on which primary locale your app uses).
 
@@ -171,6 +173,8 @@ Export credentials as environment secrets and run directly in your workflow:
 | `--create-version <ver>` | Creates new App Store version if needed | `None` |
 | `--build [cmd]` | Build release IPA (auto-detects Xcode / Flutter or runs custom command) | `None` |
 | `--upload [ipa]` | Upload IPA to TestFlight via `xcrun altool` (auto-detects .ipa if omitted) | `None` |
+| `--support-url <url>` | Default Support URL for version localizations (overridden by CSV `Support URL`) | `APP_SUPPORT_URL` in `.env` |
+| `--marketing-url <url>` | Default Marketing URL for version localizations (overridden by CSV `Marketing URL`) | `APP_MARKETING_URL` in `.env` |
 | `--no-attach-build` | Skip linking the latest TestFlight build | `false` |
 | `--key-id <id>` | App Store Connect API Key ID | `ASC_KEY_ID` in `.env` |
 | `--issuer-id <uuid>` | App Store Connect Issuer UUID | `ASC_ISSUER_ID` in `.env` |

@@ -9,7 +9,7 @@ set -eo pipefail
 INSTALL_DIR="$HOME/.asc-release"
 BIN_DIR="/usr/local/bin"
 ALT_BIN_DIR="$HOME/.local/bin"
-TAG="v1.0.0"
+TAG="v1.3.0"
 BASE_URL="https://raw.githubusercontent.com/vitoksmile/app-store-release-cli/${TAG}"
 
 echo "🚀 Installing app-store-release-cli (${TAG})..."

@@ -161,15 +161,28 @@ def read_metadata_csv(csv_path: str) -> list:
                 entries.append(clean_row)
     return entries
 
-def validate_entries(entries: list):
-    """Enforces App Store Connect character limits."""
+def is_valid_url(url: str) -> bool:
+    """Checks that a URL uses http/https and includes a network location."""
+    parsed = urllib.parse.urlparse(url)
+    return parsed.scheme in ('http', 'https') and bool(parsed.netloc)
+
+def validate_entries(entries: list, default_support_url: str = None, default_marketing_url: str = None):
+    """Enforces App Store Connect character limits and URL formats."""
     errors = []
+    if default_support_url and not is_valid_url(default_support_url):
+        errors.append(f"[CLI/Env] 'Support URL' is not a valid http(s) URL: {default_support_url}")
+    if default_marketing_url and not is_valid_url(default_marketing_url):
+        errors.append(f"[CLI/Env] 'Marketing URL' is not a valid http(s) URL: {default_marketing_url}")
     for entry in entries:
         lang = entry.get('Language', 'Unknown')
         for field, max_len in LIMITS.items():
             val = entry.get(field, "")
             if len(val) > max_len:
                 errors.append(f"[{lang}] '{field}' exceeds {max_len} chars (length: {len(val)})")
+        for url_field in ('Support URL', 'Marketing URL'):
+            url_val = entry.get(url_field, "")
+            if url_val and not is_valid_url(url_val):
+                errors.append(f"[{lang}] '{url_field}' is not a valid http(s) URL: {url_val}")
     if errors:
         raise ValueError("Metadata validation failed:\n" + "\n".join(errors))
 
@@ -421,6 +434,9 @@ Examples:
 
   # Create a brand new App Store version if no editable version exists:
   asc-release --create-version 1.4.1 --submit
+
+  # Sync metadata and set Support URL & Marketing URL across locales:
+  asc-release --support-url https://example.com/support --marketing-url https://example.com
         """
     )
     parser.add_argument('--bundle-id', default=os.getenv('APP_BUNDLE_ID'), help="Bundle identifier (e.g. com.example.app). Required.")
@@ -432,11 +448,15 @@ Examples:
     parser.add_argument('--key-id', default=os.getenv('ASC_KEY_ID'), help="App Store Connect API Key ID")
     parser.add_argument('--issuer-id', default=os.getenv('ASC_ISSUER_ID'), help="App Store Connect Issuer ID")
     parser.add_argument('--key-file', default=os.getenv('ASC_KEY_FILE'), help="Path to AuthKey_*.p8 private key file")
+    parser.add_argument('--support-url', default=os.getenv('APP_SUPPORT_URL'), help="Default Support URL for version localizations (overridden by CSV 'Support URL' column)")
+    parser.add_argument('--marketing-url', default=os.getenv('APP_MARKETING_URL'), help="Default Marketing URL for version localizations (overridden by CSV 'Marketing URL' column)")
     parser.add_argument('--no-attach-build', action='store_true', help="Skip automatically attaching the latest uploaded build")
     parser.add_argument('--submit', action='store_true', help="Submit the release for App Store review")
     parser.add_argument('--dry-run', action='store_true', help="Validate CSV and test connection without modifying anything")
     
     args = parser.parse_args()
+    args.support_url = args.support_url.strip() if args.support_url else None
+    args.marketing_url = args.marketing_url.strip() if args.marketing_url else None
     
     print("==================================================")
     print("🚀 App Store Connect Release & Metadata Sync")
@@ -457,11 +477,11 @@ Examples:
     entries = read_metadata_csv(args.csv)
     print(f"📖 Loaded {len(entries)} language entries from: {args.csv}")
     
-    # 3. Validate character limits
-    print("🔍 Validating metadata character limits...")
+    # 3. Validate character limits & URLs
+    print("🔍 Validating metadata character limits and URLs...")
     try:
-        validate_entries(entries)
-        print("  ✅ All metadata fields within App Store Connect limits.")
+        validate_entries(entries, default_support_url=args.support_url, default_marketing_url=args.marketing_url)
+        print("  ✅ All metadata fields valid and within App Store Connect limits.")
     except ValueError as e:
         print(f"\n❌ Validation Error:\n{e}")
         sys.exit(1)
@@ -640,6 +660,12 @@ Examples:
                 print(f"    - What's New: {wn_text} ({len(wn_text)} chars)")
             if entry.get('Keywords'):
                 print(f"    - Keywords: {entry['Keywords'][:50]}... ({len(entry['Keywords'])} chars)")
+            support_url = entry.get('Support URL') or args.support_url
+            marketing_url = entry.get('Marketing URL') or args.marketing_url
+            if support_url:
+                print(f"    - Support URL: {support_url}")
+            if marketing_url:
+                print(f"    - Marketing URL: {marketing_url}")
         print("\n✅ Dry run complete. Everything looks good!")
         return
 
@@ -660,6 +686,12 @@ Examples:
             ver_attrs['description'] = entry['Description']
         if entry.get('Keywords'):
             ver_attrs['keywords'] = entry['Keywords']
+        support_url = entry.get('Support URL') or args.support_url
+        marketing_url = entry.get('Marketing URL') or args.marketing_url
+        if support_url:
+            ver_attrs['supportUrl'] = support_url
+        if marketing_url:
+            ver_attrs['marketingUrl'] = marketing_url
             
         if matched in existing_version_locs:
             loc_id = existing_version_locs[matched]["id"]
